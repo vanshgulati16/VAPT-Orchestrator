@@ -98,7 +98,7 @@ def run_nuclei_basic(
         "nuclei",
         "-u", target,
         "-severity", severity_arg,
-        "-json",
+        "-jsonl",
         "-o", str(output_file),
     ]
 

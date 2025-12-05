@@ -27,6 +27,8 @@ from .report_generator import (
     generate_html_report,
 )
 from .web_analysis import summarize_https_posture, summarize_tech_stack
+from .web_headers import analyze_security_headers
+
 
 
 def _extract_host(target: str) -> str:
@@ -55,6 +57,7 @@ class VAPTOrchestrator:
     """
     High-level controller that:
     - Asks LLM to plan which tools to run
+    - Applies profile presets and CLI overrides
     - Executes tools (nmap, nuclei, subfinder, httpx, ffuf)
     - Aggregates and parses results
     - Performs web analysis (HTTPS posture, tech stack) based on httpx
@@ -67,7 +70,15 @@ class VAPTOrchestrator:
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         self.llm = LLMClient()
 
-    def run_assessment(self, target: str, output_path: Optional[str] = None) -> str:
+    def run_assessment(
+        self,
+        target: str,
+        output_path: Optional[str] = None,
+        profile: Optional[str] = None,
+        environment: Optional[str] = None,
+        tool_overrides: Optional[Dict[str, bool]] = None,
+        plan_only: bool = False,
+    ) -> str:
         print(f"[+] Starting assessment for target: {target}")
 
         # Split once so all tools use consistent host/url
@@ -78,6 +89,12 @@ class VAPTOrchestrator:
         print("[+] Asking LLM to plan toolchain...")
         plan = self.llm.plan_toolchain(target=target)
 
+        # Inject environment/profile into plan for reporting
+        plan["environment"] = environment or plan.get("environment") or "dev"
+        if profile:
+            plan["profile"] = profile
+
+        # Base flags from LLM plan
         use_nmap = bool(plan.get("use_nmap", True))
         use_nuclei = bool(plan.get("use_nuclei", True))
         use_subfinder = bool(plan.get("use_subfinder", False))
@@ -85,17 +102,66 @@ class VAPTOrchestrator:
         use_ffuf = bool(plan.get("use_ffuf", False))
         nuclei_severities = plan.get("nuclei_severities", ["medium", "high", "critical"])
 
+        # 1a) Apply profile presets (before CLI overrides)
+        if profile == "web-recon":
+            # Focused on web-facing: recon + httpx + nuclei
+            use_nmap = False
+            use_subfinder = True
+            use_httpx = True
+            use_nuclei = True
+            use_ffuf = False
+            nuclei_severities = ["info", "low", "medium", "high", "critical"]
+        elif profile == "infra":
+            # Internal/infra: ports + vuln templates
+            use_nmap = True
+            use_subfinder = False
+            use_httpx = False
+            use_nuclei = True
+            use_ffuf = False
+        elif profile == "full":
+            # Everything turned on
+            use_nmap = True
+            use_subfinder = True
+            use_httpx = True
+            use_nuclei = True
+            use_ffuf = True
+
+        # 1b) Apply explicit CLI overrides (highest priority)
+        overrides = tool_overrides or {}
+        if "use_nmap" in overrides:
+            use_nmap = bool(overrides["use_nmap"])
+        if "use_nuclei" in overrides:
+            use_nuclei = bool(overrides["use_nuclei"])
+        if "use_subfinder" in overrides:
+            use_subfinder = bool(overrides["use_subfinder"])
+        if "use_httpx" in overrides:
+            use_httpx = bool(overrides["use_httpx"])
+        if "use_ffuf" in overrides:
+            use_ffuf = bool(overrides["use_ffuf"])
+
+        # Reflect final decisions back into plan for reporting
+        plan["use_nmap"] = use_nmap
+        plan["use_nuclei"] = use_nuclei
+        plan["use_subfinder"] = use_subfinder
+        plan["use_httpx"] = use_httpx
+        plan["use_ffuf"] = use_ffuf
+        plan["nuclei_severities"] = nuclei_severities
+
         print(
-            "[+] Toolchain plan:\n"
-            f"    nmap={use_nmap}, nuclei={use_nuclei}, subfinder={use_subfinder}, httpx={use_httpx},\n"
-            f"    ffuf={use_ffuf}\n"
+            "[+] Final toolchain configuration:\n"
+            f"    environment={plan.get('environment')}, profile={plan.get('profile', 'auto')}\n"
+            f"    nmap={use_nmap}, nuclei={use_nuclei}, subfinder={use_subfinder}, httpx={use_httpx}, ffuf={use_ffuf}\n"
             f"    nuclei_severities={nuclei_severities}"
         )
+
+        if plan_only:
+            print("[+] Plan-only mode enabled; no tools will be executed.")
+            return ""
 
         all_findings: List[Dict[str, Any]] = []
         tool_summaries: List[str] = []
 
-        # 2) Run tools according to the plan (recon -> web probe -> network/vuln -> extras)
+        # 2) Run tools according to the final configuration
 
         # ---------------- Subfinder (recon) – TXT file + parsed findings ----------------
         subfinder_file_path: Optional[str] = None
@@ -167,6 +233,19 @@ class VAPTOrchestrator:
                     )
             except Exception as e:
                 print(f"[!] Tech stack summarization failed: {e}")
+
+            try:
+                print("[+] Fetching sample URLs to analyze security headers (HSTS, CSP, cookies, etc.)...")
+                header_findings = analyze_security_headers(httpx_findings)
+                all_findings.extend(header_findings)
+                tool_summaries.append(
+                    "Security header analysis (HSTS, CSP, XFO, X-XSS-Protection, Referrer-Policy, cookies) "
+                    "on a sample of live httpx endpoints."
+                )
+                print(f"[+] Security headers analyzed for {len(header_findings)} URLs.")
+            except Exception as e:
+                print(f"[!] Security header analysis failed: {e}")
+
 
         # ---------------- Nmap (network) – host/IP only ----------------
         if use_nmap:

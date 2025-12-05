@@ -53,8 +53,12 @@ def generate_markdown_report(
     """
 
     header = "# VAPT Assessment Report\n\n"
+    environment = plan.get("environment", "dev")
+    profile = plan.get("profile", "auto")
     meta = (
         f"- **Target**: `{target}`\n"
+        f"- **Environment**: `{environment}`\n"
+        f"- **Profile**: `{profile}`\n"
         f"- **Timestamp (UTC)**: `{timestamp}`\n"
         f"- **Tools planned by AI**: "
         f"Nmap: {'Yes' if plan.get('use_nmap', True) else 'No'}, "
@@ -155,6 +159,34 @@ n\n"
                 ) + "\n"
             posture_section += "\n"
 
+    # Secuirty Header summary
+    security_section = "## Security Headers Overview\n\n"
+    security_header_findings = by_tool.get("security_headers", [])
+
+    if not security_header_findings:
+        security_section += "_No security header checks were performed or no data was collected._\n\n"
+    else:
+        security_section += (
+            "| URL | Status | HSTS | CSP | X-Frame-Options | X-XSS-Protection | "
+            "Referrer-Policy | Any Secure Cookie | Any HttpOnly Cookie |\n"
+        )
+        security_section += (
+            "|-----|--------|------|-----|-----------------|------------------|"
+            "----------------|------------------|---------------------|\n"
+        )
+        for f in security_header_findings:
+            security_section += (
+                f"| `{f.get('url')}` | {f.get('status_code') or ''} | "
+                f"{'Yes' if f.get('has_hsts') else 'No'} | "
+                f"{'Yes' if f.get('has_csp') else 'No'} | "
+                f"{'Yes' if f.get('has_xfo') else 'No'} | "
+                f"{'Yes' if f.get('has_xxss') else 'No'} | "
+                f"{'Yes' if f.get('has_referrer_policy') else 'No'} | "
+                f"{'Yes' if f.get('any_cookie_secure') else 'No'} | "
+                f"{'Yes' if f.get('any_cookie_httponly') else 'No'} |\n"
+            )
+        security_section += "\n"
+
     # ---------------- Technical Details (Nmap + Nuclei + ffuf) ----------------
     details_section = "## Technical Findings\n\n"
 
@@ -231,7 +263,7 @@ n\n"
     # ---------------- LLM Executive Summary at the end ----------------
     summary_section = "## Executive Narrative Summary\n\n" + llm_summary.strip() + "\n\n"
 
-    return header + meta + disclaimer + plan_section + recon_section + posture_section + details_section + risk_section + summary_section
+    return header + meta + disclaimer + plan_section + recon_section + posture_section + security_section + details_section + risk_section + summary_section
 
 
 def generate_html_report(
@@ -262,6 +294,12 @@ def generate_html_report(
     https_posture_findings = by_tool.get("https_posture", [])
     tech_stack_list = by_tool.get("tech_stack_summary", [])
     nuclei_buckets = _bucket_nuclei_by_severity(nuclei_findings)
+    security_header_findings = by_tool.get("security_headers", [])
+
+
+    environment = plan.get("environment", "dev")
+    profile = plan.get("profile", "auto")
+    
 
     def esc(s: Any) -> str:
         return ("" if s is None else str(s)).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -295,6 +333,8 @@ def generate_html_report(
     html.append("<div class='meta'>")
     html.append(f"<div><strong>Target:</strong> <code>{esc(target)}</code></div>")
     html.append(f"<div><strong>Timestamp (UTC):</strong> <code>{esc(timestamp)}</code></div>")
+    html.append(f"<div><strong>Environment:</strong> <code>{esc(environment)}</code></div>")
+    html.append(f"<div><strong>Profile:</strong> <code>{esc(profile)}</code></div>")
     html.append(
         f"<div><strong>Tools planned by AI:</strong> "
         f"Nmap: {'Yes' if plan.get('use_nmap', True) else 'No'}, "
@@ -408,6 +448,43 @@ def generate_html_report(
                     + ", ".join(f"<code>{esc(t)}</code>" for t in techs)
                     + "</p>"
                 )
+    
+    # ---------------- Security Headers ----------------
+    html.append("<h2>Security Headers Overview</h2>")
+    if not security_header_findings:
+        html.append("<p><em>No security header checks were performed or no data was collected.</em></p>")
+    else:
+        html.append("<table>")
+        html.append(
+            "<thead><tr>"
+            "<th>URL</th>"
+            "<th>Status</th>"
+            "<th>HSTS</th>"
+            "<th>CSP</th>"
+            "<th>X-Frame-Options</th>"
+            "<th>X-XSS-Protection</th>"
+            "<th>Referrer-Policy</th>"
+            "<th>Any Secure Cookie</th>"
+            "<th>Any HttpOnly Cookie</th>"
+            "</tr></thead>"
+        )
+        html.append("<tbody>")
+        for f in security_header_findings:
+            html.append(
+                "<tr>"
+                f"<td><code>{esc(f.get('url'))}</code></td>"
+                f"<td>{esc(f.get('status_code'))}</td>"
+                f"<td>{'Yes' if f.get('has_hsts') else 'No'}</td>"
+                f"<td>{'Yes' if f.get('has_csp') else 'No'}</td>"
+                f"<td>{'Yes' if f.get('has_xfo') else 'No'}</td>"
+                f"<td>{'Yes' if f.get('has_xxss') else 'No'}</td>"
+                f"<td>{'Yes' if f.get('has_referrer_policy') else 'No'}</td>"
+                f"<td>{'Yes' if f.get('any_cookie_secure') else 'No'}</td>"
+                f"<td>{'Yes' if f.get('any_cookie_httponly') else 'No'}</td>"
+                "</tr>"
+            )
+        html.append("</tbody></table>")
+
 
     # ---------------- Technical Findings ----------------
     html.append("<h2>Technical Findings</h2>")
